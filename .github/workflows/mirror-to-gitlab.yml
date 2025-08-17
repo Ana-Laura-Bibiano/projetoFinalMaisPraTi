@@ -1,4 +1,4 @@
-name: Mirror to GitLab
+name: Mirror & Prune (GitLab)
 
 on:
   push:
@@ -9,81 +9,38 @@ on:
     tags: ["**"]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: mirror-to-gitlab
-  cancel-in-progress: false
-
 jobs:
-  to_gitlab:
+  mirror:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout full history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: Configure identity + LFS
+      - name: Set git identity
         run: |
           git config user.name "GitHub→GitLab Mirror Bot"
           git config user.email "mirror-bot@users.noreply.github.com"
-          git lfs install --skip-smudge
-          git config --global lfs.locksverify false
 
-      - name: Build remote & fetch origin
+      - name: Mirror to GitLab
         env:
-          GL_TOKEN: ${{ secrets.GITLAB_REMOTE }}   # token glpat-...
-          GL_PATH:  ${{ vars.GITLAB_PATH }}        # ex.: meu-grupo/subgrupo/meu-repo
-
-        run: |
-          set -e
-          [ -n "$GL_PATH" ] || { echo "Defina a variable GITLAB_PATH"; exit 1; }
-          REMOTE="https://oauth2:${GL_TOKEN}@gitlab.com/${GL_PATH}.git"
-          REMOTE="${REMOTE%/}"
-          git ls-remote "$REMOTE" >/dev/null
-          git remote add gitlab "$REMOTE" || git remote set-url gitlab "$REMOTE"
-          # traga TODAS as branches/tags do GitHub (origin)
-          git fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
-          git remote -v
-
-
-      - name: Sync branches (NO force; SKIP main)
-        run: |
-          set -e
-          mapfile -t ORIGIN_BRANCHES < <(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin)
-          echo "Branches no origin:"
-          printf ' - %s\n' "${ORIGIN_BRANCHES[@]}"
-          for br in "${ORIGIN_BRANCHES[@]}"; do
-            if [ "$br" = "main" ]; then
-              echo "→ Skip 'main' (protegida, merge feito no GitLab)"
-              continue
-            fi
-            echo "→ Pushing $br (sem force)"
-            git push gitlab "refs/remotes/origin/$br:refs/heads/$br"
-          done
-
-      - name: Prune branches no GitLab (SKIP main)
-        shell: bash
+          GITLAB_URL: ${{ secrets.GITLAB_URL }}
         run: |
           set -euo pipefail
-          # branches do origin (GitHub)
-          ORIGIN_BRANCHES="$(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin || true)"
-          # branches existentes no GitLab
-          GL_BRANCHES="$(git ls-remote --heads gitlab | awk '{print $2}' | sed 's#refs/heads/##' || true)"
+          if git remote get-url gitlab >/dev/null 2>&1; then
+            git remote set-url gitlab "$GITLAB_URL"
+          else
+            git remote add gitlab "$GITLAB_URL"
+          fi
+          git fetch gitlab --prune
+          git push gitlab +refs/heads/*:refs/heads/* --prune
+          git push gitlab --tags
 
-          # nada a fazer?
-          [ -n "$GL_BRANCHES" ] || exit 0
-
-          # percorre branches do GitLab e remove as que não existem mais no origin (exceto main)
-          while IFS= read -r br; do
-            [ -n "$br" ] || continue
-            [ "$br" = "main" ] && continue
-            if ! grep -qx "$br" <<< "$ORIGIN_BRANCHES"; then
-              echo "→ Deletando no GitLab: $br (não existe no origin)"
-              git push gitlab ":refs/heads/$br" || true
-            fi
-          done <<< "$GL_BRANCHES"
-
+  prune:
+    needs: mirror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+    needs: mirror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
